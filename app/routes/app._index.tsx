@@ -17,7 +17,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     setting = await db.storeSetting.create({
       data: {
         shop,
-        activeProvider: "gemini",
+        activeProvider: null,
         activeModel: null,
         developerMode: false,
         requireApproval: true,
@@ -25,7 +25,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     });
   }
 
-  // Count active/valid credentials
+  // Check if the currently active provider is connected and valid
+  const activeCred = setting.activeProvider
+    ? await db.aiCredential.findUnique({
+        where: {
+          shop_provider: {
+            shop,
+            provider: setting.activeProvider,
+          },
+        },
+      })
+    : null;
+
+  const isActiveBrainConnected = Boolean(activeCred?.isValid);
+
+  // Count total valid connected credentials
   const validCredentialsCount = await db.aiCredential.count({
     where: {
       shop,
@@ -33,21 +47,34 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     },
   });
 
+  const providerNames: Record<string, string> = {
+    gemini: "Google Gemini",
+    openai: "OpenAI",
+    anthropic: "Anthropic Claude",
+    openrouter: "OpenRouter",
+  };
+
+  const activeProviderName = setting.activeProvider
+    ? providerNames[setting.activeProvider] || setting.activeProvider
+    : null;
+
   return {
     shop,
     setting: {
       activeProvider: setting.activeProvider,
+      activeProviderName,
       activeModel: setting.activeModel,
       developerMode: setting.developerMode,
       requireApproval: setting.requireApproval,
     },
-    hasAiConnected: validCredentialsCount > 0,
+    isActiveBrainConnected,
     validCredentialsCount,
   };
 };
 
 export default function Dashboard() {
-  const { shop, setting, hasAiConnected } = useLoaderData<typeof loader>();
+  const { shop, setting, isActiveBrainConnected, validCredentialsCount } =
+    useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
   return (
@@ -89,13 +116,19 @@ export default function Dashboard() {
               <s-stack direction="block" gap="none">
                 <s-heading>AI Brain Connection</s-heading>
                 <s-paragraph>
-                  {hasAiConnected
-                    ? `Connected via ${setting.activeProvider.toUpperCase()}${setting.activeModel ? ` (${setting.activeModel})` : ""}`
-                    : "Not connected. Connect Google Gemini, OpenAI, Claude, or OpenRouter to enable the AI assistant."}
+                  {isActiveBrainConnected && setting.activeProviderName
+                    ? `Active Brain: ${setting.activeProviderName}${setting.activeModel ? ` (${setting.activeModel})` : ""}. Ready for AI Developer.`
+                    : validCredentialsCount > 0
+                    ? "Connected providers available — no active AI selected. Visit AI Connections to select your active brain."
+                    : "Not connected. Connect Google Gemini or OpenAI in AI Connections to enable the AI assistant."}
                 </s-paragraph>
               </s-stack>
-              <s-badge tone={hasAiConnected ? "success" : "caution"}>
-                {hasAiConnected ? "Connected" : "Not connected"}
+              <s-badge tone={isActiveBrainConnected ? "success" : "caution"}>
+                {isActiveBrainConnected
+                  ? "Connected"
+                  : validCredentialsCount > 0
+                  ? "Action Required"
+                  : "Not connected"}
               </s-badge>
             </s-stack>
           </s-box>

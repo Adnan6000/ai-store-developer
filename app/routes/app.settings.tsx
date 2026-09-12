@@ -12,19 +12,52 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     where: { shop },
   });
 
+  const activeProvider = setting?.activeProvider || null;
+  const activeCred = activeProvider
+    ? await db.aiCredential.findUnique({
+        where: {
+          shop_provider: {
+            shop,
+            provider: activeProvider,
+          },
+        },
+      })
+    : null;
+
+  const validCredentialsCount = await db.aiCredential.count({
+    where: {
+      shop,
+      isValid: true,
+    },
+  });
+
+  const providerNames: Record<string, string> = {
+    gemini: "Google Gemini",
+    openai: "OpenAI",
+    anthropic: "Anthropic Claude",
+    openrouter: "OpenRouter",
+  };
+
+  const activeProviderName = activeProvider
+    ? providerNames[activeProvider] || activeProvider
+    : null;
+
   return {
     shop,
     setting: {
-      activeProvider: setting?.activeProvider || "gemini",
+      activeProvider,
+      activeProviderName,
       activeModel: setting?.activeModel || null,
       developerMode: setting?.developerMode || false,
       requireApproval: setting?.requireApproval ?? true,
     },
+    isActiveConnected: Boolean(activeCred?.isValid),
+    validCredentialsCount,
   };
 };
 
 export default function Settings() {
-  const { shop, setting } = useLoaderData<typeof loader>();
+  const { shop, setting, isActiveConnected, validCredentialsCount } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
   return (
@@ -72,10 +105,39 @@ export default function Settings() {
       <s-section heading="Provider Configuration">
         <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
           <s-stack direction="block" gap="base">
-            <s-heading>Active Brain: {setting.activeProvider.toUpperCase()}</s-heading>
-            <s-paragraph>
-              Current Model: {setting.activeModel || "Default (Configurable in AI Connections)"}
-            </s-paragraph>
+            <s-stack direction="inline" gap="base">
+              <s-stack direction="block" gap="none">
+                <s-heading>
+                  {isActiveConnected && setting.activeProviderName
+                    ? `Active Brain: ${setting.activeProviderName}`
+                    : validCredentialsCount > 0
+                    ? "Connected providers available — no active AI selected"
+                    : "Not connected"}
+                </s-heading>
+                <s-paragraph>
+                  {isActiveConnected && setting.activeProviderName
+                    ? `Current Model: ${setting.activeModel || "Default (Configurable in AI Connections)"}`
+                    : validCredentialsCount > 0
+                    ? "You have verified AI connections available, but no active provider is selected. Select an active brain in AI Connections."
+                    : "No AI provider connected. Connect Google Gemini or OpenAI in AI Connections to get started."}
+                </s-paragraph>
+              </s-stack>
+              <s-badge
+                tone={
+                  isActiveConnected
+                    ? "success"
+                    : validCredentialsCount > 0
+                    ? "caution"
+                    : "caution"
+                }
+              >
+                {isActiveConnected
+                  ? "Connected"
+                  : validCredentialsCount > 0
+                  ? "Action Required"
+                  : "Not connected"}
+              </s-badge>
+            </s-stack>
             <s-stack direction="inline" gap="base">
               <s-button onClick={() => navigate("/app/connections")}>
                 Configure Providers
@@ -92,7 +154,7 @@ export default function Settings() {
         </s-paragraph>
         <s-paragraph>
           <s-text>Version: </s-text>
-          <code>1.0.0-m1</code>
+          <code>1.0.0-m2</code>
         </s-paragraph>
       </s-section>
     </s-page>

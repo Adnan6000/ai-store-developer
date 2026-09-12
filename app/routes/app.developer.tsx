@@ -19,7 +19,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return {
     shop,
     hasAiConnected: credentialCount > 0,
-    activeProvider: setting?.activeProvider || "gemini",
+    activeProvider: setting?.activeProvider || null,
   };
 };
 
@@ -56,7 +56,9 @@ export default function AiDeveloper() {
             </s-box>
             <s-stack direction="inline" gap="base">
               <s-button onClick={() => navigate("/app/connections")}>
-                Verify AI Provider ({activeProvider.toUpperCase()})
+                {activeProvider
+                  ? `Verify AI Provider (${activeProvider.toUpperCase()})`
+                  : "Connect AI Provider"}
               </s-button>
               <s-button onClick={() => navigate("/app/context")}>
                 View Store Context

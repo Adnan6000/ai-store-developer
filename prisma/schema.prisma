@@ -36,7 +36,7 @@ model Session {
 model StoreSetting {
   id              String   @id @default(uuid())
   shop            String   @unique
-  activeProvider  String   @default("gemini")
+  activeProvider  String?
   activeModel     String?
   developerMode   Boolean  @default(false)
   requireApproval Boolean  @default(true)

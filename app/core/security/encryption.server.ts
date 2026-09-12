@@ -3,23 +3,34 @@ import crypto from "node:crypto";
 const ALGORITHM = "aes-256-gcm";
 const CURRENT_KEY_VERSION = 1;
 
+const MIN_SECRET_LENGTH = 32;
+
 /**
- * Derives a 32-byte encryption key from the environment.
- * Requires ENCRYPTION_SECRET, or safely falls back to SHOPIFY_API_SECRET in dev only.
+ * Checks whether the credential encryption secret is configured and satisfies minimum entropy requirements.
+ * ENCRYPTION_SECRET is required across all environments (development, test, production).
+ * Strictly never falls back to SHOPIFY_API_SECRET or any other secret.
+ */
+export function isEncryptionConfigured(): boolean {
+  const secret = process.env.ENCRYPTION_SECRET;
+  return Boolean(secret && secret.trim().length >= MIN_SECRET_LENGTH);
+}
+
+/**
+ * Derives a 32-byte encryption key from ENCRYPTION_SECRET.
+ * Requires ENCRYPTION_SECRET in ALL environments.
+ * Strictly never falls back to SHOPIFY_API_SECRET.
  */
 function getEncryptionKey(): Buffer {
-  const secret = process.env.ENCRYPTION_SECRET || process.env.SHOPIFY_API_SECRET;
+  const secret = process.env.ENCRYPTION_SECRET;
 
-  if (!secret) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("ENCRYPTION_SECRET environment variable is required in production.");
-    }
-    // Safe deterministic development fallback to avoid crashing during early scaffolding
-    return crypto.createHash("sha256").update("ai-store-developer-dev-fallback-key").digest();
+  if (!secret || secret.trim().length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      "Encryption configuration is missing or insufficient. ENCRYPTION_SECRET must be configured with a high-entropy secret (at least 32 characters, recommended 64 hex characters)."
+    );
   }
 
   // Derive a 32-byte key using SHA-256
-  return crypto.createHash("sha256").update(secret).digest();
+  return crypto.createHash("sha256").update(secret.trim()).digest();
 }
 
 export interface EncryptedPayload {
