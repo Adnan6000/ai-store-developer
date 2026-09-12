@@ -1,8 +1,9 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, useNavigate } from "react-router";
+import { useLoaderData, useNavigate, useRouteError } from "react-router";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import db from "../db.server";
+import { getLatestStoreContextSnapshot } from "../core/context/context-cache.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -47,6 +48,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     },
   });
 
+  // Check latest Store Context Snapshot
+  const contextSnapshot = await getLatestStoreContextSnapshot(shop);
+
+  const productCount =
+    contextSnapshot?.summary?.productSummary?.totalCount ?? 0;
+  const collectionCount =
+    contextSnapshot?.summary?.collectionSummary?.totalCount ?? 0;
+  const metafieldCount = Array.isArray(
+    contextSnapshot?.summary?.metafieldDefinitions
+  )
+    ? contextSnapshot.summary.metafieldDefinitions.length
+    : 0;
+  const metaobjectCount = Array.isArray(
+    contextSnapshot?.summary?.metaobjectDefinitions
+  )
+    ? contextSnapshot.summary.metaobjectDefinitions.length
+    : 0;
+
   const providerNames: Record<string, string> = {
     gemini: "Google Gemini",
     openai: "OpenAI",
@@ -69,12 +88,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     },
     isActiveBrainConnected,
     validCredentialsCount,
+    latestContextSnapshot: contextSnapshot
+      ? {
+          analyzedAt: contextSnapshot.analyzedAt.toISOString(),
+          productCount,
+          collectionCount,
+          metafieldCount,
+          metaobjectCount,
+        }
+      : null,
   };
 };
 
 export default function Dashboard() {
-  const { shop, setting, isActiveBrainConnected, validCredentialsCount } =
-    useLoaderData<typeof loader>();
+  const {
+    shop,
+    setting,
+    isActiveBrainConnected,
+    validCredentialsCount,
+    latestContextSnapshot,
+  } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
   return (
@@ -139,10 +172,27 @@ export default function Dashboard() {
               <s-stack direction="block" gap="none">
                 <s-heading>Store Context Analyzer</s-heading>
                 <s-paragraph>
-                  Store schema, metafield definitions, and metaobjects have not yet been indexed for this session.
+                  {latestContextSnapshot
+                    ? `Analyzed • Last analyzed: ${new Date(latestContextSnapshot.analyzedAt).toLocaleString()}`
+                    : "Store schema, metafield definitions, and metaobjects have not yet been indexed."}
                 </s-paragraph>
+                {latestContextSnapshot && (
+                  <s-paragraph>
+                    <strong>{latestContextSnapshot.productCount.toLocaleString()} Products</strong> •{" "}
+                    <strong>{latestContextSnapshot.collectionCount.toLocaleString()} Collections</strong> •{" "}
+                    {latestContextSnapshot.metafieldCount} Metafields •{" "}
+                    {latestContextSnapshot.metaobjectCount} Metaobjects
+                  </s-paragraph>
+                )}
               </s-stack>
-              <s-badge tone="info">Not analyzed</s-badge>
+              <s-stack direction="inline" gap="small">
+                <s-badge tone={latestContextSnapshot ? "success" : "info"}>
+                  {latestContextSnapshot ? "Analyzed" : "Not analyzed"}
+                </s-badge>
+                <s-button onClick={() => navigate("/app/context")}>
+                  {latestContextSnapshot ? "View Store Context" : "Analyze Store"}
+                </s-button>
+              </s-stack>
             </s-stack>
           </s-box>
 
@@ -213,7 +263,8 @@ export default function Dashboard() {
 }
 
 export function ErrorBoundary() {
-  return boundary.error(boundary);
+  const error = useRouteError();
+  return boundary.error(error);
 }
 
 export const headers: HeadersFunction = (headersArgs) => {

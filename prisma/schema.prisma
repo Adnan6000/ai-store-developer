@@ -60,3 +60,14 @@ model AiCredential {
 
   @@unique([shop, provider])
 }
+
+model StoreContextSnapshot {
+  id            String   @id @default(uuid())
+  shop          String
+  summaryJson   String
+  schemaVersion Int      @default(1)
+  analyzedAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([shop, analyzedAt])
+}
