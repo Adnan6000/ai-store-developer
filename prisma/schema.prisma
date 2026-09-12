@@ -32,3 +32,31 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+model StoreSetting {
+  id              String   @id @default(uuid())
+  shop            String   @unique
+  activeProvider  String   @default("gemini")
+  activeModel     String?
+  developerMode   Boolean  @default(false)
+  requireApproval Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model AiCredential {
+  id              String    @id @default(uuid())
+  shop            String
+  provider        String
+  encryptedApiKey String
+  iv              String
+  authTag         String
+  keyVersion      Int       @default(1)
+  lastFour        String
+  isValid         Boolean   @default(true)
+  lastValidatedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([shop, provider])
+}
