@@ -2,6 +2,7 @@ import db from "../../db.server";
 import { decryptCredential } from "../security/encryption.server";
 import { getProvider } from "./provider.factory.server";
 import { buildBoundedContextString } from "./context-projection.server";
+import { selectPlanningModel } from "./model-selection.server";
 import {
   extractJsonFromResponse,
   validateAndNormalizePlan,
@@ -10,6 +11,7 @@ import { saveAiPlan, type PersistedAiPlan } from "./plan-persistence.server";
 import type { StoreContextSummary } from "../context/types";
 import type {
   AiDevelopmentPlan,
+  AiModelInfo,
   PlanningMode,
   ProviderAttempt,
   SupportedProviderId,
@@ -84,8 +86,9 @@ function buildUserPrompt(
   userRequest: string,
   boundedContextStr: string | null
 ): string {
-  const contextStr = boundedContextStr
-    || "No store context snapshot available. This plan must be general and flag missing store context.";
+  const contextStr =
+    boundedContextStr ||
+    "No store context snapshot available. This plan must be general and flag missing store context.";
 
   return `MERCHANT REQUEST:
 ${userRequest}
@@ -116,14 +119,15 @@ Output ONLY a JSON object adhering to this schema:
 }
 
 /**
- * Orchestrates plan generation, failover, validation, and optional secondary AI review.
+ * Orchestrates plan generation, model selection, failover,
+ * validation, and optional secondary AI review.
  */
 export async function executePlanning(
   options: PlanExecutionOptions
 ): Promise<PlanExecutionResult> {
   const { shop, userRequest, mode, contextSnapshot } = options;
 
-  // Enforce store context requirement
+  // Enforce store context requirement.
   if (!contextSnapshot) {
     return {
       success: false,
@@ -135,7 +139,7 @@ export async function executePlanning(
     };
   }
 
-  // 1. Discover all connected and valid credentials for this shop
+  // 1. Discover all connected and valid credentials for this shop.
   const credentials = await db.aiCredential.findMany({
     where: {
       shop,
@@ -153,23 +157,25 @@ export async function executePlanning(
     };
   }
 
-  // 2. Fetch merchant's active provider setting
+  // 2. Fetch merchant's active provider/model settings.
   const setting = await db.storeSetting.findUnique({
     where: { shop },
   });
 
-  const preferredProviderId = (setting?.activeProvider as SupportedProviderId) || null;
+  const preferredProviderId =
+    (setting?.activeProvider as SupportedProviderId) || null;
 
-  // Sort providers so activeProvider is tried first, followed by other connected providers
+  // Active provider is tried first, followed by other connected providers.
   const candidateCredentials = [...credentials].sort((a, b) => {
     if (a.provider === preferredProviderId) return -1;
     if (b.provider === preferredProviderId) return 1;
     return 0;
   });
 
-  const boundedContextStr = contextSnapshot
-    ? buildBoundedContextString(contextSnapshot.summary)
-    : null;
+  const boundedContextStr = buildBoundedContextString(
+    contextSnapshot.summary
+  );
+
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(userRequest, boundedContextStr);
 
@@ -179,12 +185,13 @@ export async function executePlanning(
   let modelUsed: string | undefined;
   let fallbackOccurred = false;
 
-  // 3. Try primary provider with safe failover
+  // 3. Try candidate providers with centralized model selection.
   for (let i = 0; i < candidateCredentials.length; i++) {
     const cred = candidateCredentials[i];
     const providerId = cred.provider as SupportedProviderId;
 
     let decryptedKey: string;
+
     try {
       decryptedKey = decryptCredential({
         encryptedApiKey: cred.encryptedApiKey,
@@ -199,23 +206,73 @@ export async function executePlanning(
         errorClassification: "AUTH_ERROR",
         message: "Failed to decrypt stored provider credentials.",
       });
+
       continue;
     }
 
     let providerInstance;
+
     try {
       providerInstance = getProvider(providerId);
     } catch {
+      attempts.push({
+        provider: providerId,
+        status: "FAILED",
+        errorClassification: "PROVIDER_UNAVAILABLE",
+        message: `Provider ${providerId} is not available.`,
+      });
+
       continue;
     }
 
     if (!providerInstance.generatePlan) {
+      attempts.push({
+        provider: providerId,
+        status: "FAILED",
+        errorClassification: "PROVIDER_UNAVAILABLE",
+        message: `Provider ${providerId} does not support plan generation.`,
+      });
+
       continue;
     }
 
-    // Determine model to use (if matching active provider, use saved activeModel)
-    const selectedModel =
-      providerId === setting?.activeProvider ? setting?.activeModel : null;
+    // Discover provider models when supported.
+    // Discovery failure itself must not make the provider unusable.
+    let availableModels: AiModelInfo[] | undefined;
+
+    if (providerInstance.getModels) {
+      try {
+        availableModels =
+          await providerInstance.getModels(decryptedKey);
+      } catch {
+        availableModels = undefined;
+      }
+    }
+
+    // Merchant's saved model only applies to their active provider.
+    const savedModel =
+      providerId === preferredProviderId
+        ? setting?.activeModel
+        : null;
+
+    const modelSelection = selectPlanningModel(
+      providerId,
+      savedModel,
+      availableModels
+    );
+
+    const selectedModel = modelSelection.selectedModel;
+
+    if (!selectedModel) {
+      attempts.push({
+        provider: providerId,
+        status: "FAILED",
+        errorClassification: "MODEL_UNAVAILABLE",
+        message: `No suitable planning model is available for ${providerId}.`,
+      });
+
+      continue;
+    }
 
     const genResult = await providerInstance.generatePlan({
       apiKey: decryptedKey,
@@ -229,31 +286,37 @@ export async function executePlanning(
         provider: providerId,
         status: "SUCCESS",
       });
+
       winningProviderId = providerId;
       rawPlanContent = genResult.rawContent;
-      modelUsed = genResult.modelUsed;
+      modelUsed = genResult.modelUsed || selectedModel;
 
       if (i > 0) {
         fallbackOccurred = true;
       }
-      break;
-    } else {
-      attempts.push({
-        provider: providerId,
-        status: "FAILED",
-        errorClassification: genResult.errorClassification || "UNKNOWN",
-        message: genResult.errorMessage || "Provider failed to generate plan.",
-      });
 
-      // Log failover attempt — NEVER break the loop on a single provider's failure.
-      // CORE RULE: ONE HEALTHY PROVIDER = SYSTEM OPERATIONAL.
-      // All provider-specific errors are eligible for cross-provider failover.
-      const errorClass = genResult.errorClassification || "UNKNOWN";
-      if (candidateCredentials.length > 1) {
-        console.warn(
-          `[AI Planner] Provider ${providerId} failed (${errorClass}). Continuing to next connected provider...`
-        );
-      }
+      break;
+    }
+
+    attempts.push({
+      provider: providerId,
+      status: "FAILED",
+      errorClassification:
+        genResult.errorClassification || "UNKNOWN",
+      message:
+        genResult.errorMessage ||
+        "Provider failed to generate plan.",
+    });
+
+    // One provider failure does not make the whole system unavailable.
+    // Cross-provider failover continues while another connected provider exists.
+    const errorClass =
+      genResult.errorClassification || "UNKNOWN";
+
+    if (candidateCredentials.length > 1) {
+      console.warn(
+        `[AI Planner] Provider ${providerId} failed (${errorClass}). Continuing to next connected provider...`
+      );
     }
   }
 
@@ -263,43 +326,65 @@ export async function executePlanning(
       fallbackOccurred,
       attempts,
       errorMessage:
-        "All connected AI providers were unable to generate a plan. Please check your AI connection status and API keys.",
+        "All connected AI providers were unable to generate a plan. Please check your AI connection status, API keys, quota, and selected models.",
     };
   }
 
-  // 4. Parse JSON with bounded (max 1) repair attempt if invalid
+  // 4. Parse generated JSON with a maximum of one bounded repair attempt.
   let parsedJson: unknown;
+
   try {
-    parsedJson = extractJsonFromResponse(rawPlanContent);
+    parsedJson =
+      extractJsonFromResponse(rawPlanContent);
   } catch (err: unknown) {
-    // Attempt ONE bounded repair call
     const repairPrompt = `The previous JSON response was malformed or failed to parse.
-Error: ${err instanceof Error ? err.message : String(err)}
+Error: ${
+      err instanceof Error
+        ? err.message
+        : String(err)
+    }
 Please regenerate the entire technical plan as pure, valid JSON adhering strictly to the required schema.`;
 
-    const repairCred = candidateCredentials.find((c) => c.provider === winningProviderId);
+    const repairCred =
+      candidateCredentials.find(
+        (c) => c.provider === winningProviderId
+      );
+
     if (repairCred) {
       try {
-        const decryptedKey = decryptCredential({
-          encryptedApiKey: repairCred.encryptedApiKey,
-          iv: repairCred.iv,
-          authTag: repairCred.authTag,
-          keyVersion: repairCred.keyVersion,
-        });
-        const providerInstance = getProvider(winningProviderId);
-        if (providerInstance.generatePlan) {
-          const repairResult = await providerInstance.generatePlan({
-            apiKey: decryptedKey,
-            systemPrompt,
-            userPrompt: `${userPrompt}\n\n${repairPrompt}`,
-            model: modelUsed,
+        const decryptedKey =
+          decryptCredential({
+            encryptedApiKey:
+              repairCred.encryptedApiKey,
+            iv: repairCred.iv,
+            authTag: repairCred.authTag,
+            keyVersion: repairCred.keyVersion,
           });
-          if (repairResult.success && repairResult.rawContent) {
-            parsedJson = extractJsonFromResponse(repairResult.rawContent);
+
+        const providerInstance =
+          getProvider(winningProviderId);
+
+        if (providerInstance.generatePlan) {
+          const repairResult =
+            await providerInstance.generatePlan({
+              apiKey: decryptedKey,
+              systemPrompt,
+              userPrompt: `${userPrompt}\n\n${repairPrompt}`,
+              model: modelUsed,
+            });
+
+          if (
+            repairResult.success &&
+            repairResult.rawContent
+          ) {
+            parsedJson =
+              extractJsonFromResponse(
+                repairResult.rawContent
+              );
           }
         }
       } catch {
-        // repair attempt failed
+        // Repair attempt failed.
       }
     }
 
@@ -314,88 +399,217 @@ Please regenerate the entire technical plan as pure, valid JSON adhering strictl
     }
   }
 
-  // 5. REVIEWED MODE: If requested and a SECOND healthy provider exists, get structured review
-  let reviewerProviderId: SupportedProviderId | null = null;
+  // 5. REVIEWED MODE:
+  // If requested and a second connected provider exists,
+  // ask it to review the primary plan.
+  let reviewerProviderId:
+    | SupportedProviderId
+    | null = null;
+
   let effectiveMode: PlanningMode = mode;
 
   if (mode === "REVIEWED") {
-    // Find a second connected provider distinct from winningProviderId
-    const reviewerCred = candidateCredentials.find(
-      (c) => c.provider !== winningProviderId
-    );
+    const reviewerCred =
+      candidateCredentials.find(
+        (c) =>
+          c.provider !== winningProviderId
+      );
 
     if (reviewerCred) {
-      const revProviderId = reviewerCred.provider as SupportedProviderId;
-      try {
-        const decryptedRevKey = decryptCredential({
-          encryptedApiKey: reviewerCred.encryptedApiKey,
-          iv: reviewerCred.iv,
-          authTag: reviewerCred.authTag,
-          keyVersion: reviewerCred.keyVersion,
-        });
+      const revProviderId =
+        reviewerCred.provider as SupportedProviderId;
 
-        const revProviderInstance = getProvider(revProviderId);
+      try {
+        const decryptedRevKey =
+          decryptCredential({
+            encryptedApiKey:
+              reviewerCred.encryptedApiKey,
+            iv: reviewerCred.iv,
+            authTag: reviewerCred.authTag,
+            keyVersion: reviewerCred.keyVersion,
+          });
+
+        const revProviderInstance =
+          getProvider(revProviderId);
+
         if (revProviderInstance.reviewPlan) {
-          const revResult = await revProviderInstance.reviewPlan({
-            apiKey: decryptedRevKey,
-            systemPrompt: buildReviewerSystemPrompt(),
-            userPrompt: `MERCHANT REQUEST:
+          let reviewerModels:
+            | AiModelInfo[]
+            | undefined;
+
+          if (revProviderInstance.getModels) {
+            try {
+              reviewerModels =
+                await revProviderInstance.getModels(
+                  decryptedRevKey
+                );
+            } catch {
+              reviewerModels = undefined;
+            }
+          }
+
+          const reviewerModelSelection =
+            selectPlanningModel(
+              revProviderId,
+              revProviderId ===
+                preferredProviderId
+                ? setting?.activeModel
+                : null,
+              reviewerModels
+            );
+
+          const revResult =
+            await revProviderInstance.reviewPlan({
+              apiKey: decryptedRevKey,
+              systemPrompt:
+                buildReviewerSystemPrompt(),
+              userPrompt: `MERCHANT REQUEST:
 ${userRequest}
 
 PROPOSED TECHNICAL PLAN:
 ${JSON.stringify(parsedJson, null, 2)}`,
-          });
+              model:
+                reviewerModelSelection.selectedModel,
+            });
 
-          if (revResult.success && revResult.review) {
-            reviewerProviderId = revProviderId;
+          if (
+            revResult.success &&
+            revResult.review
+          ) {
+            reviewerProviderId =
+              revProviderId;
+
             const review = revResult.review;
 
-            // Merge reviewer findings safely into the raw plan
-            const planObj = parsedJson as Record<string, unknown>;
-            const existingAssumptions = Array.isArray(planObj.assumptions)
-              ? (planObj.assumptions as string[])
-              : [];
-            const existingQuestions = Array.isArray(planObj.questions)
-              ? (planObj.questions as string[])
-              : [];
-            const existingWarnings = Array.isArray(planObj.warnings)
-              ? (planObj.warnings as string[])
-              : [];
+            const planObj =
+              parsedJson as Record<
+                string,
+                unknown
+              >;
+
+            const existingAssumptions =
+              Array.isArray(
+                planObj.assumptions
+              )
+                ? (planObj.assumptions as string[])
+                : [];
+
+            const existingQuestions =
+              Array.isArray(planObj.questions)
+                ? (planObj.questions as string[])
+                : [];
+
+            const existingWarnings =
+              Array.isArray(planObj.warnings)
+                ? (planObj.warnings as string[])
+                : [];
 
             planObj.assumptions = [
               ...existingAssumptions,
-              ...review.additionalAssumptions.map((a) => `[AI Reviewer] ${a}`),
+              ...review.additionalAssumptions.map(
+                (assumption) =>
+                  `[AI Reviewer] ${assumption}`
+              ),
             ];
+
             planObj.questions = [
               ...existingQuestions,
-              ...review.additionalQuestions.map((q) => `[AI Reviewer] ${q}`),
+              ...review.additionalQuestions.map(
+                (question) =>
+                  `[AI Reviewer] ${question}`
+              ),
             ];
+
             const mergedWarnings = [
               ...existingWarnings,
-              ...review.additionalWarnings.map((w) => `[AI Reviewer] ${w}`),
+              ...review.additionalWarnings.map(
+                (warning) =>
+                  `[AI Reviewer] ${warning}`
+              ),
             ];
+
             if (review.critiqueSummary) {
-              mergedWarnings.push(`[AI Review Note] ${review.critiqueSummary}`);
+              mergedWarnings.push(
+                `[AI Review Note] ${review.critiqueSummary}`
+              );
             }
-            planObj.warnings = mergedWarnings;
+
+            // Suggested step modifications are currently advisory only.
+            // They are intentionally NOT applied automatically because
+            // proposedSteps must remain deterministic and server-validated.
+            if (
+              review.suggestedStepModifications
+                .length > 0
+            ) {
+              mergedWarnings.push(
+                ...review.suggestedStepModifications.map(
+                  (suggestion) =>
+                    `[AI Reviewer Step Suggestion] ${suggestion}`
+                )
+              );
+            }
+
+            planObj.warnings =
+              mergedWarnings;
           } else {
-            // Secondary review failed, keep primary plan and add warning
-            const planObj = parsedJson as Record<string, unknown>;
-            const currentWarnings = Array.isArray(planObj.warnings) ? (planObj.warnings as string[]) : [];
+            const planObj =
+              parsedJson as Record<
+                string,
+                unknown
+              >;
+
+            const currentWarnings =
+              Array.isArray(planObj.warnings)
+                ? (planObj.warnings as string[])
+                : [];
+
             planObj.warnings = [
               ...currentWarnings,
               "Secondary AI review unavailable; plan generated solely by primary provider.",
             ];
           }
+        } else {
+          const planObj =
+            parsedJson as Record<
+              string,
+              unknown
+            >;
+
+          const currentWarnings =
+            Array.isArray(planObj.warnings)
+              ? (planObj.warnings as string[])
+              : [];
+
+          planObj.warnings = [
+            ...currentWarnings,
+            `Secondary provider ${revProviderId} does not support plan review.`,
+          ];
         }
       } catch {
-        // Non-fatal: continue with primary plan
+        const planObj =
+          parsedJson as Record<string, unknown>;
+
+        const currentWarnings =
+          Array.isArray(planObj.warnings)
+            ? (planObj.warnings as string[])
+            : [];
+
+        planObj.warnings = [
+          ...currentWarnings,
+          "Secondary AI review failed unexpectedly; primary plan retained.",
+        ];
       }
     } else {
-      // Only one provider connected; fall back to STANDARD gracefully
       effectiveMode = "STANDARD";
-      const planObj = parsedJson as Record<string, unknown>;
-      const currentWarnings = Array.isArray(planObj.warnings) ? (planObj.warnings as string[]) : [];
+
+      const planObj =
+        parsedJson as Record<string, unknown>;
+
+      const currentWarnings =
+        Array.isArray(planObj.warnings)
+          ? (planObj.warnings as string[])
+          : [];
+
       planObj.warnings = [
         ...currentWarnings,
         "Reviewed mode requested, but only one AI provider is connected. Plan generated in Standard mode.",
@@ -403,37 +617,49 @@ ${JSON.stringify(parsedJson, null, 2)}`,
     }
   }
 
-  // 6. Validate, normalize, and classify risks using our server-side rules
-  const validationResult = validateAndNormalizePlan(parsedJson, {
-    shop,
-    userRequest,
-    requestedMode: mode,
-    effectiveMode,
-    primaryProvider: winningProviderId,
-    reviewerProvider: reviewerProviderId,
-    fallbackOccurred,
-    attempts,
-    contextSnapshotId: contextSnapshot.id,
-    contextAnalyzedAt: contextSnapshot.analyzedAt.toISOString(),
-    grantedScopes: contextSnapshot.summary.capabilities.grantedScopes,
-  });
+  // 6. Validate, normalize, and classify risk using server-side rules.
+  const validationResult =
+    validateAndNormalizePlan(parsedJson, {
+      shop,
+      userRequest,
+      requestedMode: mode,
+      effectiveMode,
+      primaryProvider:
+        winningProviderId,
+      reviewerProvider:
+        reviewerProviderId,
+      fallbackOccurred,
+      attempts,
+      contextSnapshotId:
+        contextSnapshot.id,
+      contextAnalyzedAt:
+        contextSnapshot.analyzedAt.toISOString(),
+      grantedScopes:
+        contextSnapshot.summary.capabilities
+          .grantedScopes,
+    });
 
-  if (!validationResult.valid || !validationResult.plan) {
+  if (
+    !validationResult.valid ||
+    !validationResult.plan
+  ) {
     return {
       success: false,
       fallbackOccurred,
       attempts,
       errorMessage: `Plan validation failed: ${
-        validationResult.errors?.join("; ") || "Unknown schema error"
+        validationResult.errors?.join("; ") ||
+        "Unknown schema error"
       }. No Shopify changes were made.`,
     };
   }
 
-  // 7. Persist the validated plan in the database
-  const persistedPlan = await saveAiPlan(
-    validationResult.plan,
-    contextSnapshot.id
-  );
+  // 7. Persist validated plan.
+  const persistedPlan =
+    await saveAiPlan(
+      validationResult.plan,
+      contextSnapshot.id
+    );
 
   return {
     success: true,
