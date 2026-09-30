@@ -1,6 +1,6 @@
 # Current Development Status
 
-Last reconstructed status:
+Last updated:
 
 30 September 2026
 
@@ -24,10 +24,12 @@ Milestone 4 — AI Planning & Approval Engine
 
 Status:
 
-WIP / Stabilization
+Runtime Validation / Final Stabilization
 
-## Last Known Commits
+## Recent Commits
 
+- `b428651` Milestone 4: wire centralized model selection and reviewer safeguards
+- `32c5179` Fix: stabilize AI router and TypeScript configuration
 - `53537a3` Documentation structure created
 - `3c9ddf4` Milestone 4 WIP
 - `8adce02` Milestone 3
@@ -40,26 +42,22 @@ WIP / Stabilization
 Latest checks:
 
 - `npm run typecheck` — PASS
+- `npm run lint` — PASS
 - `npm run build` — PASS
 - `npx prisma migrate status` — PASS
 - database schema is up to date
 
 Known non-blocking warnings:
 
+- current TypeScript version is newer than the officially supported range of the installed `@typescript-eslint/typescript-estree`
 - React Router v8 future-flag warnings
 - npm update notification
 
-## Recently Fixed
+## Completed Stabilization Work
 
-Removed an invalid and unused import of:
+### TypeScript Configuration
 
-`isRecoverableProviderError`
-
-from:
-
-`app/core/ai/provider-router.server.ts`
-
-Removed deprecated TypeScript:
+Removed deprecated:
 
 `baseUrl`
 
@@ -67,48 +65,104 @@ from:
 
 `tsconfig.json`
 
-## Current Uncommitted Code Changes
+### Provider Router
 
-- `app/core/ai/provider-router.server.ts`
-- `tsconfig.json`
-
-## Current Milestone 4 Gaps
+Removed invalid/unused error-classifier import.
 
 ### Model Selection
 
-`model-selection.server.ts` exists but is not yet fully wired into orchestration.
+`model-selection.server.ts` is now wired into planning orchestration.
+
+Current selection behavior:
+
+1. merchant saved model for the active provider
+2. discovered preferred provider model
+3. centrally configured preferred fallback
+4. fail provider if no suitable model can be resolved
 
 ### Provider Failover
 
-Final policy is still required for:
+Current product rule:
 
-- retry
-- failover
-- user action
-- immediate stop
+**One healthy provider = system operational.**
+
+Provider-specific failure does not terminate planning while another connected provider is available.
+
+Cross-provider failover supports:
+
+- AUTH_ERROR
+- PERMISSION_DENIED
+- MODEL_UNAVAILABLE
+- QUOTA_OR_RATE_LIMIT
+- PROVIDER_UNAVAILABLE
+- NETWORK_ERROR
+- INVALID_RESPONSE
+- UNKNOWN
 
 ### Reviewed Mode
 
-Reviewer can currently return:
+Reviewer output can add:
 
-- additional assumptions
-- additional questions
-- additional warnings
+- assumptions
+- questions
+- warnings
 - critique summary
 - suggested step modifications
 
-The final policy for applying `suggestedStepModifications` is not complete.
+Suggested step modifications are currently advisory only.
+
+They are preserved as reviewer warnings and are not automatically used to rewrite validated plan steps.
+
+This prevents a second model from silently changing the primary plan before server-side validation.
 
 ## Current Safety State
 
-The application is planning-only.
+The application remains planning-only.
 
-Approved plans do not yet execute Shopify mutations.
+Approved plans do not execute Shopify mutations.
 
-## Immediate Next Work
+Planning and execution remain intentionally separated.
 
-1. populate documentation
-2. commit current code/config fixes separately
-3. finish Milestone 4 stabilization
-4. define UX Foundation
-5. start Safe Execution Engine design
+## Current Milestone 4 Remaining Work
+
+### Runtime Tests
+
+Required:
+
+- Standard mode with one provider
+- Standard mode with two providers
+- Reviewed mode with two providers
+- Reviewed mode fallback to Standard with one provider
+- primary provider failure and secondary-provider recovery
+- invalid/malformed plan JSON
+- failed JSON repair
+- missing store context
+- no usable provider
+- blocked plan
+- approve valid plan
+- reject valid plan
+
+### Security / Isolation Tests
+
+Required:
+
+- one shop cannot access another shop's plans
+- one shop cannot approve another shop's plan
+- history is tenant-isolated
+- credentials remain tenant-isolated
+- shop identity always derives from authenticated Shopify session
+
+## Next Development Sequence
+
+1. run Milestone 4 runtime tests
+2. fix any runtime defects discovered
+3. update testing documentation
+4. finalize Milestone 4 checkpoint
+5. begin Milestone 4.5 UX Foundation
+6. design Milestone 5 Safe Shopify Execution Engine
+
+## Working Tree State
+
+Expected after documentation update and commit:
+
+`nothing to commit, working tree clean`

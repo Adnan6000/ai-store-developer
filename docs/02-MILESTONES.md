@@ -57,16 +57,22 @@ Commit:
 
 ## Milestone 4 — AI Planning & Approval Engine 🟡
 
-Implemented / WIP:
+Implemented:
 
 - provider routing
-- failover
+- centralized model selection
+- preferred-model resolution
+- discovered-model fallback
+- cross-provider failover
+- normalized provider error classification
 - context projection
 - structured plan schema
 - malformed JSON repair
 - optional secondary AI review
+- reviewer assumptions/questions/warnings merge
+- reviewer step suggestions preserved as advisory warnings
 - risk classification
-- plan validation
+- server-side plan validation
 - plan persistence
 - Standard mode
 - Reviewed mode
@@ -75,22 +81,61 @@ Implemented / WIP:
 - recent-plan dashboard state
 - explicit no-execution safety barrier
 
-Current checkpoint:
+Important checkpoints:
 
-`3c9ddf4`
+- `3c9ddf4` Milestone 4 WIP
+- `b428651` Centralized model selection and reviewer safeguards
+
+### Current Failover Policy
+
+The product follows this rule:
+
+**One healthy provider = system operational.**
+
+Provider-specific failures do not stop the full planning flow while another connected provider is available.
+
+Examples eligible for cross-provider failover:
+
+- authentication failure
+- permission failure
+- rate/quota limit
+- model unavailable
+- provider outage
+- network failure
+- invalid response
+- unknown provider failure
+
+Same-provider uncontrolled retries are intentionally avoided.
+
+### Reviewed Mode Policy
+
+Secondary AI review is advisory.
+
+Reviewer output may add:
+
+- assumptions
+- questions
+- warnings
+- critique
+- suggested step modifications
+
+Suggested step modifications are not automatically applied to `proposedSteps`.
+
+They are preserved as advisory warnings so that server-side validated plan structure remains deterministic.
 
 ### Milestone 4 Remaining Work
 
-- fully wire `model-selection.server.ts`
-- finalize provider failover semantics
-- finalize reviewer `suggestedStepModifications` policy
-- verify Prisma migration state
 - runtime-test Standard mode
 - runtime-test Reviewed mode
+- test primary-provider failure with secondary-provider fallback
 - test malformed JSON repair
+- test repair failure
 - test blocked plans
+- verify approval/rejection behavior
 - verify cross-shop isolation
-- finalize Milestone 4 commit
+- verify history isolation
+- update documentation after runtime findings
+- finalize Milestone 4 checkpoint
 
 ## Milestone 4.5 — UX Foundation ⬜
 
