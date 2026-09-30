@@ -30,11 +30,26 @@ class OpenRouterStubProvider implements AiProvider {
   }
 }
 
+class BuiltinStubProvider implements AiProvider {
+  readonly id = "builtin" as const;
+  readonly name = "Built-in AI";
+  readonly description = "Self-hosted local open-weight model engine.";
+  readonly isEnabled = false;
+
+  async validateCredentials(): Promise<{ isValid: boolean; error: string }> {
+    return {
+      isValid: false,
+      error: "Built-in open-weight model engine is currently under development.",
+    };
+  }
+}
+
 const PROVIDER_REGISTRY: Record<SupportedProviderId, AiProvider> = {
   gemini: new GeminiProvider(),
   openai: new OpenAIProvider(),
   anthropic: new ClaudeStubProvider(),
   openrouter: new OpenRouterStubProvider(),
+  builtin: new BuiltinStubProvider(),
 };
 
 export const ALLOWED_PROVIDER_IDS: SupportedProviderId[] = [
@@ -42,6 +57,7 @@ export const ALLOWED_PROVIDER_IDS: SupportedProviderId[] = [
   "openai",
   "anthropic",
   "openrouter",
+  "builtin",
 ];
 
 export const ACTIVE_ALLOWED_PROVIDER_IDS: SupportedProviderId[] = [

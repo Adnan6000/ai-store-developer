@@ -77,6 +77,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ? providerNames[setting.activeProvider] || setting.activeProvider
     : null;
 
+  // Query latest AiPlan for this shop
+  const latestPlanRecord = await db.aiPlan.findFirst({
+    where: { shop },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const latestPlan = latestPlanRecord
+    ? {
+        id: latestPlanRecord.id,
+        userRequest: latestPlanRecord.userRequest,
+        status: latestPlanRecord.status,
+        riskLevel: latestPlanRecord.riskLevel,
+        createdAt: latestPlanRecord.createdAt.toISOString(),
+        primaryProvider: latestPlanRecord.primaryProvider,
+      }
+    : null;
+
   return {
     shop,
     setting: {
@@ -97,6 +114,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           metaobjectCount,
         }
       : null,
+    latestPlan,
   };
 };
 
@@ -107,6 +125,7 @@ export default function Dashboard() {
     isActiveBrainConnected,
     validCredentialsCount,
     latestContextSnapshot,
+    latestPlan,
   } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
@@ -212,21 +231,58 @@ export default function Dashboard() {
       </s-section>
 
       {/* Recent Activity / Builds */}
-      <s-section heading="Recent Builds">
+      <s-section heading="Recent Builds &amp; Plans">
         <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              No technical plans generated yet. Prompt the AI Developer to analyze your request and produce
-              an execution plan with diff previews.
-            </s-paragraph>
-            <s-stack direction="inline" gap="base">
-              <s-button onClick={() => navigate("/app/developer")}>
-                Start New Request
-              </s-button>
-              <s-button onClick={() => navigate("/app/history")}>
-                View Build History
-              </s-button>
-            </s-stack>
+            {latestPlan ? (
+              <s-stack direction="block" gap="small">
+                <s-stack direction="inline" gap="base">
+                  <s-stack direction="block" gap="none">
+                    <s-heading>Latest Plan: {latestPlan.userRequest.slice(0, 60)}{latestPlan.userRequest.length > 60 ? "..." : ""}</s-heading>
+                    <s-paragraph>
+                      Generated via {latestPlan.primaryProvider.toUpperCase()} • Created {new Date(latestPlan.createdAt).toLocaleString()}
+                    </s-paragraph>
+                  </s-stack>
+                  <s-badge
+                    tone={
+                      latestPlan.status === "APPROVED"
+                        ? "success"
+                        : latestPlan.status === "REJECTED"
+                        ? "critical"
+                        : "info"
+                    }
+                  >
+                    {latestPlan.status.replace(/_/g, " ")}
+                  </s-badge>
+                </s-stack>
+                <s-stack direction="inline" gap="base">
+                  <s-button variant="primary" onClick={() => navigate(`/app/developer?planId=${latestPlan.id}`)}>
+                    Inspect Latest Plan
+                  </s-button>
+                  <s-button onClick={() => navigate("/app/developer")}>
+                    Create Development Plan
+                  </s-button>
+                  <s-button onClick={() => navigate("/app/history")}>
+                    View Build History
+                  </s-button>
+                </s-stack>
+              </s-stack>
+            ) : (
+              <>
+                <s-paragraph>
+                  No technical plans generated yet. Prompt the AI Developer to analyze your request and produce
+                  a safe implementation plan with diff previews.
+                </s-paragraph>
+                <s-stack direction="inline" gap="base">
+                  <s-button variant="primary" onClick={() => navigate("/app/developer")}>
+                    Create Development Plan
+                  </s-button>
+                  <s-button onClick={() => navigate("/app/history")}>
+                    View Build History
+                  </s-button>
+                </s-stack>
+              </>
+            )}
           </s-stack>
         </s-box>
       </s-section>
