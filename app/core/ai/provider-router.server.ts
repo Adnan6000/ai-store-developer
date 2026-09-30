@@ -7,7 +7,6 @@ import {
   validateAndNormalizePlan,
 } from "./plan-validator.server";
 import { saveAiPlan, type PersistedAiPlan } from "./plan-persistence.server";
-import { isRecoverableProviderError } from "./error-classifier.server";
 import type { StoreContextSummary } from "../context/types";
 import type {
   AiDevelopmentPlan,
