@@ -1,33 +1,48 @@
 import type { AiModelInfo, SupportedProviderId } from "./types";
 
 /**
- * Centrally configured preferred models for technical planning by provider.
- * Listed in preference order. New models or retirement of old models can be adjusted here
- * without modifying provider adapters or orchestration logic.
+ * Centrally configured planning-model preferences.
+ *
+ * IMPORTANT:
+ * - Discovery from the provider is authoritative whenever available.
+ * - These lists are preferences, not assumptions that every account has access.
+ * - Specialized media / realtime / embedding models must never be selected
+ *   for Shopify technical planning.
  */
-export const PREFERRED_PLANNING_MODELS: Record<SupportedProviderId, readonly string[]> = {
+export const PREFERRED_PLANNING_MODELS: Record<
+  SupportedProviderId,
+  readonly string[]
+> = {
   openai: [
-    "gpt-4o-2024-08-06",
+    "gpt-6.1-sol",
+    "gpt-6-luna",
+    "gpt-6-astra",
+    "gpt-5.6",
+    "gpt-5.4",
+    "gpt-5",
+    "gpt-4.1",
     "gpt-4o",
-    "gpt-4o-mini-2024-07-18",
-    "gpt-4o-mini",
-    "o3-mini",
   ],
   gemini: [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-exp",
-    "gemini-1.5-pro",
-    "gemini-1.5-pro-latest",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
   ],
   anthropic: [
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku-20241022",
+    "claude-sonnet-4",
+    "claude-3-7-sonnet",
+    "claude-3-5-sonnet",
   ],
   openrouter: [
-    "anthropic/claude-3.5-sonnet",
-    "openai/gpt-4o-mini",
+    "openai/gpt-6.1-sol",
+    "google/gemini-3.8-flash",
+    "anthropic/claude-sonnet-4",
+    "openrouter/free",
   ],
   builtin: [],
 };
@@ -35,86 +50,293 @@ export const PREFERRED_PLANNING_MODELS: Record<SupportedProviderId, readonly str
 export interface ModelSelectionResult {
   selectedModel: string | null;
   supportsStrictJsonSchema: boolean;
-  source: "SAVED_ACTIVE" | "DISCOVERED_PREFERRED" | "DEFAULT_PREFERRED" | "NONE";
+  source:
+    | "SAVED_ACTIVE"
+    | "DISCOVERED_PREFERRED"
+    | "DISCOVERED_FALLBACK"
+    | "DEFAULT_PREFERRED"
+    | "NONE";
 }
 
 /**
- * Resolves the best available planning model for a provider using:
- * 1. Merchant's saved StoreSetting.activeModel (validated against available models if list provided).
- * 2. Intersection of discovered provider models and the centrally preferred models.
- * 3. Centrally preferred default model as safe fallback if model list is unavailable (e.g. OpenAI /v1/models uninformative).
+ * Models in these categories are not suitable for the text-based planning engine.
+ */
+function isSpecializedNonPlanningModel(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+
+  return [
+    /embedding/,
+    /moderation/,
+    /whisper/,
+    /transcri/,
+    /speech/,
+    /tts/,
+    /realtime/,
+    /live/,
+    /audio/,
+    /image/,
+    /imagen/,
+    /veo/,
+    /video/,
+    /lyria/,
+    /music/,
+    /robotics/,
+  ].some((pattern) => pattern.test(id));
+}
+
+/**
+ * Some models may technically produce text but are intended for a very
+ * different execution environment and should not be auto-selected here.
+ */
+function isUnsuitableAutomaticModel(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+
+  return (
+    isSpecializedNonPlanningModel(id) ||
+    /codex/.test(id) ||
+    /computer-use/.test(id) ||
+    /deep-research/.test(id) ||
+    /search/.test(id)
+  );
+}
+
+function normalizeModelId(modelId: string): string {
+  return modelId.trim().replace(/^models\//, "");
+}
+
+function findExactModel(
+  availableModels: AiModelInfo[],
+  requestedId: string
+): AiModelInfo | undefined {
+  const normalizedRequested = normalizeModelId(requestedId).toLowerCase();
+
+  return availableModels.find(
+    (model) =>
+      normalizeModelId(model.id).toLowerCase() === normalizedRequested
+  );
+}
+
+/**
+ * Gives discovered models a provider-specific planning priority.
+ *
+ * Higher score = better default for technical planning.
+ */
+function scorePlanningModel(
+  providerId: SupportedProviderId,
+  modelId: string
+): number {
+  const id = normalizeModelId(modelId).toLowerCase();
+
+  if (isUnsuitableAutomaticModel(id)) {
+    return -10000;
+  }
+
+  let score = 0;
+
+  if (providerId === "openai") {
+    if (id === "gpt-6.1-sol") score += 1000;
+    else if (id === "gpt-6-luna") score += 950;
+    else if (id === "gpt-6-astra") score += 900;
+    else if (id.startsWith("gpt-6")) score += 850;
+    else if (id.startsWith("gpt-5.6")) score += 800;
+    else if (id.startsWith("gpt-5")) score += 750;
+    else if (id.startsWith("gpt-4.1")) score += 650;
+    else if (id.startsWith("gpt-4o")) score += 600;
+    else if (id.startsWith("o3")) score += 500;
+    else if (id.startsWith("o1")) score += 450;
+    else return -1000;
+
+    if (/mini|nano/.test(id)) score -= 100;
+    if (/preview|experimental|exp/.test(id)) score -= 50;
+  }
+
+  if (providerId === "gemini") {
+    if (id === "gemini-3.8-flash") score += 1000;
+    else if (id === "gemini-3.7-flash") score += 900;
+    else if (id === "gemini-3.6-flash") score += 850;
+    else if (id === "gemini-3.5-flash") score += 800;
+    else if (id === "gemini-3.5-flash-lite") score += 750;
+    else if (id === "gemini-3.1-flash-lite") score += 700;
+    else if (id === "gemini-2.5-flash") score += 650;
+    else if (id === "gemini-2.5-pro") score += 625;
+    else if (/^gemini-/.test(id)) score += 400;
+    else return -1000;
+
+    if (/preview|experimental|exp/.test(id)) score -= 100;
+    if (/latest/.test(id)) score -= 25;
+  }
+
+  if (providerId === "anthropic") {
+    if (/sonnet/.test(id)) score += 800;
+    else if (/haiku/.test(id)) score += 600;
+    else if (/claude/.test(id)) score += 500;
+    else return -1000;
+  }
+
+  if (providerId === "openrouter") {
+    score += 300;
+
+    if (/gpt-6/.test(id)) score += 500;
+    if (/gemini-3/.test(id)) score += 450;
+    if (/claude.*sonnet/.test(id)) score += 400;
+  }
+
+  return score;
+}
+
+/**
+ * Resolves the best available planning model.
+ *
+ * Resolution order:
+ * 1. Merchant's saved model, but only when discovery confirms it exists.
+ * 2. Exact match between live discovered models and preferred models.
+ * 3. Highest-scoring suitable live discovered model.
+ * 4. Preferred default only when model discovery is unavailable.
  */
 export function selectPlanningModel(
   providerId: SupportedProviderId,
   savedModel?: string | null,
   availableModels?: AiModelInfo[]
 ): ModelSelectionResult {
-  const preferredList = PREFERRED_PLANNING_MODELS[providerId] || [];
+  const preferredList =
+    PREFERRED_PLANNING_MODELS[providerId] || [];
 
-  // 1. Check saved model if provided
-  if (savedModel && typeof savedModel === "string" && savedModel.trim()) {
-    const cleanSaved = savedModel.trim().replace(/^models\//, "");
+  const hasDiscovery =
+    Array.isArray(availableModels) &&
+    availableModels.length > 0;
 
-    // If we have an authoritative list of available models from discovery, verify the saved model exists
-    if (availableModels && availableModels.length > 0) {
-      const isAvailable = availableModels.some(
-        (m) => m.id.toLowerCase() === cleanSaved.toLowerCase()
-      );
-      if (isAvailable) {
+  // 1. Merchant's saved active model.
+  if (
+    savedModel &&
+    typeof savedModel === "string" &&
+    savedModel.trim()
+  ) {
+    const cleanSaved =
+      normalizeModelId(savedModel);
+
+    if (hasDiscovery) {
+      const discovered =
+        findExactModel(
+          availableModels!,
+          cleanSaved
+        );
+
+      if (
+        discovered &&
+        !isUnsuitableAutomaticModel(
+          discovered.id
+        )
+      ) {
         return {
-          selectedModel: cleanSaved,
-          supportsStrictJsonSchema: isStrictStructuredOutputSupported(providerId, cleanSaved),
+          selectedModel:
+            normalizeModelId(discovered.id),
+          supportsStrictJsonSchema:
+            isStrictStructuredOutputSupported(
+              providerId,
+              discovered.id
+            ),
           source: "SAVED_ACTIVE",
         };
       }
-      // Saved model is no longer available in the provider's active catalog
+
+      // Saved model disappeared or became unsuitable.
+      // Continue to live discovery instead of blindly using it.
     } else {
-      // No discovery list available; trust non-empty saved model
+      // Discovery unavailable.
+      // Trust saved merchant choice because they selected it explicitly.
       return {
         selectedModel: cleanSaved,
-        supportsStrictJsonSchema: isStrictStructuredOutputSupported(providerId, cleanSaved),
+        supportsStrictJsonSchema:
+          isStrictStructuredOutputSupported(
+            providerId,
+            cleanSaved
+          ),
         source: "SAVED_ACTIVE",
       };
     }
   }
 
-  // 2. Try to match discovered models against the preferred order
-  if (availableModels && availableModels.length > 0) {
-    for (const pref of preferredList) {
-      const match = availableModels.find(
-        (m) => m.id.toLowerCase() === pref.toLowerCase()
-      );
-      if (match) {
+  // 2. Exact preferred model discovered live.
+  if (hasDiscovery) {
+    for (const preferredId of preferredList) {
+      const match =
+        findExactModel(
+          availableModels!,
+          preferredId
+        );
+
+      if (
+        match &&
+        !isUnsuitableAutomaticModel(match.id)
+      ) {
+        const modelId =
+          normalizeModelId(match.id);
+
         return {
-          selectedModel: match.id,
-          supportsStrictJsonSchema: isStrictStructuredOutputSupported(providerId, match.id),
+          selectedModel: modelId,
+          supportsStrictJsonSchema:
+            isStrictStructuredOutputSupported(
+              providerId,
+              modelId
+            ),
           source: "DISCOVERED_PREFERRED",
         };
       }
     }
 
-    // If none of our preferred list matches but models exist, select first candidate that looks like a general chat/instruct model
-    const fallbackDiscovered = availableModels.find((m) =>
-      !/(embedding|whisper|dall-e|tts|moderation|babbage|davinci)/i.test(m.id)
-    );
-    if (fallbackDiscovered) {
-      return {
-        selectedModel: fallbackDiscovered.id,
-        supportsStrictJsonSchema: isStrictStructuredOutputSupported(
+    // 3. Rank all suitable discovered models.
+    const ranked = availableModels!
+      .map((model) => ({
+        model,
+        score: scorePlanningModel(
           providerId,
-          fallbackDiscovered.id
+          model.id
         ),
-        source: "DISCOVERED_PREFERRED",
+      }))
+      .filter(
+        ({ score }) => score > 0
+      )
+      .sort(
+        (a, b) => b.score - a.score
+      );
+
+    if (ranked.length > 0) {
+      const selectedModel =
+        normalizeModelId(
+          ranked[0].model.id
+        );
+
+      return {
+        selectedModel,
+        supportsStrictJsonSchema:
+          isStrictStructuredOutputSupported(
+            providerId,
+            selectedModel
+          ),
+        source: "DISCOVERED_FALLBACK",
       };
     }
+
+    // Discovery was authoritative and produced no planning-capable model.
+    return {
+      selectedModel: null,
+      supportsStrictJsonSchema: false,
+      source: "NONE",
+    };
   }
 
-  // 3. If discovery list is empty (e.g. OpenAI /v1/models does not report capabilities), use top preferred default
+  // 4. Discovery unavailable: use centrally configured safe fallback.
   if (preferredList.length > 0) {
-    const topPref = preferredList[0];
+    const topPreferred =
+      preferredList[0];
+
     return {
-      selectedModel: topPref,
-      supportsStrictJsonSchema: isStrictStructuredOutputSupported(providerId, topPref),
+      selectedModel: topPreferred,
+      supportsStrictJsonSchema:
+        isStrictStructuredOutputSupported(
+          providerId,
+          topPreferred
+        ),
       source: "DEFAULT_PREFERRED",
     };
   }
@@ -127,27 +349,33 @@ export function selectPlanningModel(
 }
 
 /**
- * Determines whether a model supports strict JSON schema structured outputs.
+ * Indicates whether the model family supports structured output workflows.
+ *
+ * Provider adapters still remain responsible for using the correct API syntax.
  */
 export function isStrictStructuredOutputSupported(
   providerId: SupportedProviderId,
   modelId: string
 ): boolean {
+  const id =
+    normalizeModelId(modelId)
+      .toLowerCase();
+
   if (providerId === "openai") {
-    // OpenAI models supporting response_format: { type: "json_schema", ... }
     return (
-      modelId.startsWith("gpt-4o") ||
-      modelId.startsWith("o1") ||
-      modelId.startsWith("o3")
+      id.startsWith("gpt-6") ||
+      id.startsWith("gpt-5") ||
+      id.startsWith("gpt-4.1") ||
+      id.startsWith("gpt-4o") ||
+      id.startsWith("o1") ||
+      id.startsWith("o3")
     );
   }
 
   if (providerId === "gemini") {
-    // Gemini 1.5 and 2.0 support responseSchema
     return (
-      modelId.includes("1.5") ||
-      modelId.includes("2.0") ||
-      modelId.startsWith("gemini-")
+      id.startsWith("gemini-3") ||
+      id.startsWith("gemini-2.5")
     );
   }
 
